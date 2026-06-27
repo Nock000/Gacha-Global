@@ -662,7 +662,23 @@ app.get("/banner", (req, res) => {
 
 });
 
+app.get("/odds", (req, res) => {
+  if (!requireApiKey(req, res)) return;
 
+  const bannerId = getActiveBannerId();
+  const banner = BANNERS[bannerId];
+
+  const odds = banner.items.reduce((acc, item) => {
+    acc[item.symbol] = (acc[item.symbol] || 0) + item.weight;
+    return acc;
+  }, {});
+
+  const text = Object.entries(odds)
+    .map(([symbol, weight]) => `${symbol} ${weight}%`)
+    .join(" | ");
+
+  res.send(`Pull Odds: ${text}`);
+});
 
 app.get("/setbanner", (req, res) => {
   if (!requireApiKey(req, res)) return;
