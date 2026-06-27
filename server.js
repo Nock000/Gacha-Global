@@ -1,10 +1,7 @@
 const express = require("express");
 const Database = require("better-sqlite3");
-const fs = require("fs");
-const path = require("path");
 const API_KEY = process.env.API_KEY;
 const ADMIN_KEY = process.env.ADMIN_KEY;
-const RESET_VERSION = process.env.RESET_VERSION || "";
 
 const ADMINS = ["inanks000"];
 
@@ -13,18 +10,7 @@ const BLOCKED_USERS = [
 ];
 
 const BANNERS = require("./banners");
-const PERSONNEL = require("./personnel");
-const createChronicleService = require("./services/chronicle");
-const createCommunicationsService = require("./services/communications");
 
-const {
-  renderPersonnelDirectory,
-  renderPersonnelProfile
-} = require("./views/personnel");
-
-const {
-  renderChroniclePage
-} = require("./views/chronicle");
 
 const ITEMS_BY_ID = {};
 let catalogOrder = 0;
@@ -97,33 +83,6 @@ const dbPath =
     : "./gacha.db";
 
 const db = new Database(dbPath);
-const chronicle = createChronicleService(db);
-const communications = createCommunicationsService({
-  db,
-  chronicle,
-  itemsById: ITEMS_BY_ID
-});
-
-const unchanneledDiscoveries = db.prepare(`
-  SELECT id, item_id
-  FROM chronicle_entries
-  WHERE category = 'first_discovery'
-    AND channel = 'general'
-`).all();
-
-for (const entry of unchanneledDiscoveries) {
-  const item = ITEMS_BY_ID[entry.item_id];
-
-  if (!item) continue;
-
-  const channel = communications.discoveryChannelForTier(item.tier);
-
-  db.prepare(`
-    UPDATE chronicle_entries
-    SET channel = ?
-    WHERE id = ?
-  `).run(channel, entry.id);
-}
 
 db.prepare(`
   CREATE TABLE IF NOT EXISTS pulls (
@@ -172,44 +131,6 @@ db.prepare(`
   )
 `).run();
 
-db.prepare(`
-CREATE TABLE IF NOT EXISTS chronicle_entries (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  category TEXT NOT NULL,
-  title TEXT NOT NULL,
-  message TEXT NOT NULL,
-  username TEXT,
-  item_id TEXT,
-  banner_id TEXT,
-  announced INTEGER DEFAULT 0,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-)
-`).run();
-ensureColumn("chronicle_entries", "channel", "TEXT DEFAULT 'general'");
-const chronicleCount = db.prepare(`
-  SELECT COUNT(*) AS count
-  FROM chronicle_entries
-`).get().count;
-
-if (chronicleCount === 0) {
-
-    chronicle.record({
-        category: "history",
-        title: "Chronicle Opened",
-        message: "The Sanctuary Chronicle has been established.",
-        announced: 1
-    });
-
-    chronicle.record({
-        category: "threshold",
-        title: "Late Beta",
-        message: "The Sanctuary entered late beta with persistent records, banners, pity, and the Chronicle.",
-        announced: 1
-    });
-
-}
-
-
 function getSetting(key) {
   const row = db.prepare(`
     SELECT value
@@ -233,36 +154,6 @@ if (!getSetting("active_banner")) {
   setSetting("active_banner", "standard");
 }
 
-if (
-  RESET_VERSION &&
-  getSetting("last_reset_version") !== RESET_VERSION
-) {
-  const resetBetaData = db.transaction(() => {
-
-db.prepare(`DELETE FROM pulls`).run();
-db.prepare(`DELETE FROM pity`).run();
-db.prepare(`DELETE FROM chronicle_entries`).run();
-db.prepare(`DELETE FROM chronicle_entries`).run();
-
-chronicle.record({
-  category: "history",
-  title: "Chronicle Opened",
-  message: "The Sanctuary Chronicle has been established.",
-  announced: 1
-});
-
-
-    setSetting("active_banner", "standard");
-    setSetting("last_reset_version", RESET_VERSION);
-  });
-
-  resetBetaData();
-
-  console.log(
-    `Pull history cleared for reset version: ${RESET_VERSION}`
-  );
-}
-
 const insertPull = db.prepare(`
   INSERT INTO pulls (
     username,
@@ -284,16 +175,6 @@ function savePull(username, item, pullType) {
     item.tier,
     pullType
   );
-}
-
-function isFirstDiscovery(item) {
-  const row = db.prepare(`
-    SELECT COUNT(*) AS count
-    FROM pulls
-    WHERE item_id = ?
-  `).get(item.id);
-
-  return row.count === 0;
 }
 
 function getActiveBannerId() {
@@ -573,14 +454,8 @@ const item = pullItem(bannerId, {
 });
 
 if (!isDeveloperModeActive(username)) {
-  const firstDiscovery = isFirstDiscovery(item);
-
   savePull(username, item, "gacha");
   updatePityAfterPull(username, bannerId, item);
-
-  if (firstDiscovery) {
-    communications.queueDiscovery(username, item, bannerId);
-  }
 }
 
   res.send(
@@ -622,22 +497,8 @@ const item = pullItem(bannerId, {
 results.push(item.compact);
 
 if (!isDeveloperModeActive(username)) {
-  const firstDiscovery = isFirstDiscovery(item);
-
   savePull(username, item, "tenpull");
   updatePityAfterPull(username, bannerId, item);
-
-  if (firstDiscovery) {
-    chronicle.record({
-      category: "first_discovery",
-      title: `First Discovery: ${item.name}`,
-      message: item.display,
-      username,
-      itemId: item.id,
-      bannerId,
-      announced: 0
-    });
-  }
 }
 
   }
@@ -1017,170 +878,6 @@ setSetting("gacha_paused", "off");
 res.send("Gacha resumed.");
 });
 
-app.get("/chronicle", (req, res) => {
-  const entries = db.prepare(`
-    SELECT *
-    FROM chronicle_entries
-    ORDER BY created_at DESC, id DESC
-  `).all();
-
-  res.send(renderChroniclePage("Latest Records", entries));
-});
-
-app.get("/chronicle/latest", (req, res) => {
-  const entries = db.prepare(`
-    SELECT *
-    FROM chronicle_entries
-    ORDER BY created_at DESC, id DESC
-  `).all();
-
-  res.send(renderChroniclePage("Latest Records", entries));
-});
-
-app.get("/chronicle/discoveries", (req, res) => {
-  const entries = db.prepare(`
-    SELECT *
-    FROM chronicle_entries
-    WHERE category = 'first_discovery'
-    ORDER BY created_at DESC, id DESC
-  `).all();
-
-  res.send(renderChroniclePage("First Discoveries", entries));
-});
-
-app.get("/chronicle/collections", (req, res) => {
-  const entries = db.prepare(`
-    SELECT *
-    FROM chronicle_entries
-    WHERE category = 'collection'
-    ORDER BY created_at DESC, id DESC
-  `).all();
-
-  res.send(renderChroniclePage("Collection Records", entries));
-});
-
-app.get("/chronicle/thresholds", (req, res) => {
-  const entries = db.prepare(`
-    SELECT *
-    FROM chronicle_entries
-    WHERE category = 'threshold'
-    ORDER BY created_at DESC, id DESC
-  `).all();
-
-  res.send(renderChroniclePage("Threshold Records", entries));
-});
-
-app.get("/chronicle/personnel", (req, res) => {
-  res.send(renderPersonnelDirectory(PERSONNEL));
-});
-
-app.get("/chronicle/personnel/:person", (req, res) => {
-  const person = PERSONNEL[req.params.person];
-
-  if (!person) {
-    return res.status(404).send("Personnel file not found.");
-  }
-
-  res.send(renderPersonnelProfile(person));
-});
-app.get("/chronicle/history", (req, res) => {
-  const entries = db.prepare(`
-    SELECT *
-    FROM chronicle_entries
-    WHERE category = 'history'
-    ORDER BY created_at DESC, id DESC
-  `).all();
-
-  res.send(renderChroniclePage("Sanctuary History", entries));
-});
-
-app.get("/chronicle.css", (req, res) => {
-  res.sendFile(path.join(__dirname, "chronicle.css"));
-});
-
-app.get("/pending", (req, res) => {
-  if (!requireApiKey(req, res)) return;
-
-  const admin = getAdminOrReply(req, res);
-  if (!admin) return;
-
-  res.send(
-    communications.getPendingSummary()
-  );
-});
-
-app.get("/announce", (req, res) => {
-  if (!requireApiKey(req, res)) return;
-
-  const admin = getAdminOrReply(req, res);
-  if (!admin) return;
-
-  const channel = req.query.channel || "common";
-
-  const announcement = communications.announceNext(channel);
-
-  if (!announcement) {
-    return res.send("No pending Chronicle announcements.");
-  }
-
-  res.send(announcement);
-});
-
-app.get("/cleartier1", (req, res) => {
-  if (!requireApiKey(req, res)) return;
-
-  const admin = getAdminOrReply(req, res);
-  if (!admin) return;
-
-  const cleared = communications.clearChannel("common");
-
-  if (cleared === null) {
-    return res.send("That channel cannot be cleared.");
-  }
-
-  res.send(`Cleared ${cleared} common discovery announcements.`);
-});
-
-app.get("/cleartier2", (req, res) => {
-  if (!requireApiKey(req, res)) return;
-
-  const admin = getAdminOrReply(req, res);
-  if (!admin) return;
-
-  const cleared = communications.clearChannel("uncommon");
-
-  res.send(`Cleared ${cleared} uncommon discovery announcements.`);
-});
-
-app.get("/cleartier3", (req, res) => {
-  if (!requireApiKey(req, res)) return;
-
-  const admin = getAdminOrReply(req, res);
-  if (!admin) return;
-
-  const cleared = communications.clearChannel("uncommon");
-
-  res.send(`Cleared ${cleared} uncommon discovery announcements.`);
-});
-
-app.get("/cleartier4", (req, res) => {
-  if (!requireApiKey(req, res)) return;
-
-  const admin = getAdminOrReply(req, res);
-  if (!admin) return;
-
-  const cleared = communications.clearChannel("uncommon");
-
-  res.send(`Cleared ${cleared} uncommon discovery announcements.`);
-});
-
-app.get("/chronicle-command", (req, res) => {
-  if (!requireApiKey(req, res)) return;
-
-  res.send(
-    "📜 Sanctuary Chronicle: https://gacha-api-production.up.railway.app/chronicle"
-  );
-});
 
 app.get("/profile", (req, res) => {
   if (!requireApiKey(req, res)) return;
